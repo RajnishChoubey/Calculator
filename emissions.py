@@ -1,185 +1,146 @@
 import streamlit as st
-from datetime import datetime
-import json
-import csv
-import io
+import pandas as pd
 
-# Field configuration
-fuel_types = [
-    "LFO", "HFO", "MGO",
-    "LPG(P)", "LPG(B)", "LNG Otto MS", "LNG Otto SS",
-    "LNG Diesel SS", "LNG LBSI", "BioFuel 1", "BioFuel 2", "BioFuel 3"
-]
-engine_types = ["ME", "AE", "Others", "Off-hire"]
+# Add emission factors (from your spreadsheet)
+EMISSION_FACTORS = {
+    "LFO <80 CST": {
+        "LCV_MJ_g": 0.041, "GHG_WtW_gCO2e_MJ": 91.39, "CO2_TtW_gCO2e_MJ": 76.85,
+    },
+    "LFO> 80 CST": {
+        "LCV_MJ_g": 0.0405, "GHG_WtW_gCO2e_MJ": 91.74, "CO2_TtW_gCO2e_MJ": 76.89,
+    },
+    "HFO": {
+        "LCV_MJ_g": 0.0405, "GHG_WtW_gCO2e_MJ": 91.74, "CO2_TtW_gCO2e_MJ": 76.89,
+    },
+    "MDO/MGO": {
+        "LCV_MJ_g": 0.0427, "GHG_WtW_gCO2e_MJ": 90.77, "CO2_TtW_gCO2e_MJ": 75.08,
+    },
+    "LPG (P)": {
+        "LCV_MJ_g": 0.046, "GHG_WtW_gCO2e_MJ": 74.21, "CO2_TtW_gCO2e_MJ": 65.22,
+    },
+    "LPG (B)": {
+        "LCV_MJ_g": 0.046, "GHG_WtW_gCO2e_MJ": 74.86, "CO2_TtW_gCO2e_MJ": 65.87,
+    },
+    "LNG Otto MS": {
+        "LCV_MJ_g": 0.0491, "GHG_WtW_gCO2e_MJ": 89.20, "CO2_TtW_gCO2e_MJ": 54.27,
+    },
+    "LNG Otto SS": {
+        "LCV_MJ_g": 0.0491, "GHG_WtW_gCO2e_MJ": 82.87, "CO2_TtW_gCO2e_MJ": 55.06,
+    },
+    "LNG Diesel SS": {
+        "LCV_MJ_g": 0.0491, "GHG_WtW_gCO2e_MJ": 76.08, "CO2_TtW_gCO2e_MJ": 55.90,
+    },
+    "LBSI": {
+        "LCV_MJ_g": 0.0491, "GHG_WtW_gCO2e_MJ": 86.94, "CO2_TtW_gCO2e_MJ": 54.55,
+    },
+    "Biofuel 1": {
+        "LCV_MJ_g": 0.037, "GHG_WtW_gCO2e_MJ": 16.28, "CO2_TtW_gCO2e_MJ": 76.59,
+    }
+}
 
-def validate_imo_number(imo: str) -> bool:
-    return imo.isdigit() and len(imo) == 7
+FUEL_LIST = list(EMISSION_FACTORS.keys())
 
-def validate_date(date_str: str) -> bool:
-    try:
-        datetime.strptime(date_str, "%d/%m/%Y")
-        return True
-    except:
-        return False
+def calc_energy_mt(fuel_mass_ton, lcv_mj_g):
+    # 1 ton = 1e6 g, so MJ = lcv * mass(ton) * 1e6
+    return lcv_mj_g * fuel_mass_ton * 1e6 / 1e6  # MJ, convert to TJ below when needed
 
-def validate_time(time_str: str) -> bool:
-    try:
-        datetime.strptime(time_str, "%H:%M")
-        return True
-    except:
-        return False
+def calc_ghg_mt(total_energy_mj, ghg_ef_wtw):
+    # GHG = MJ * gCO2e/MJ = gCO2e, convert to MT (divide by 1e6)
+    return total_energy_mj * ghg_ef_wtw / 1e6
 
-def validate_percentage(value: float) -> bool:
-    return value in [0, 50, 100]
+def calc_co2_mt(total_energy_mj, co2_ef_ttw):
+    # CO2 = MJ * gCO2/MJ = gCO2, convert to MT (divide by 1e6)
+    return total_energy_mj * co2_ef_ttw / 1e6
 
-def flatten_dict(d, parent_key='', sep='_'):
-    items = []
-    for k, v in d.items():
-        new_key = f"{parent_key}{sep}{k}" if parent_key else k
-        if isinstance(v, dict):
-            items.extend(flatten_dict(v, new_key, sep=sep).items())
-        else:
-            items.append((new_key, v))
-    return dict(items)
+def calc_eua(co2_mt):
+    # EUA = 1 EUA per 1 ton CO2
+    return co2_mt
 
-def download_csv(data: dict):
-    # Flatten for CSV
-    flat = flatten_dict(data)
-    output = io.StringIO()
-    writer = csv.writer(output)
-    writer.writerow(['Field', 'Value'])
-    for k, v in flat.items():
-        writer.writerow([k, v])
-    return output.getvalue()
+st.title("EU ETS & FuelEU Maritime Emissions Calculator")
 
-# Main form
-st.title("EU ETS and FuelEU Maritime Calculator")
-st.write("Enter all voyage details, emission data, and fuel measurements:")
+st.header("Ship & Voyage Particulars")
+vessel_name = st.text_input("Vessel Name", "Pacific Ruby")
+imo_number = st.text_input("IMO Number", "1234567")
+main_engine = st.selectbox('Main Engine Type', FUEL_LIST)
+aux_engine = st.selectbox('Aux Engine Type', FUEL_LIST)
+from_port = st.text_input("From Port", "Cadiz")
+to_port = st.text_input("To Port", "Singapore")
+voyage_no = st.text_input("Voyage No.", "202502 VNGDA-ESCAD")
+distance = st.number_input("Distance (nm)", value=1873)
+departure_date = st.date_input("Departure Date")
+arrival_date = st.date_input("Arrival Date")
+departure_time = st.text_input("Departure Time (hh:mm)", "11:00")
+arrival_time = st.text_input("Arrival Time (hh:mm)", "10:18")
+cargo_carried = st.number_input("Cargo Carried (tonnes)", value=13612)
+condition = st.selectbox("Condition", ["Laden", "Ballast"])
 
-with st.form("voyage_form"):
-    st.header("Basic Voyage Information")
-    imo_number = st.text_input("IMO No.")
-    vessel = st.text_input("Vessel")
-    application_year = st.text_input("Application Year")
-    emission_statement_number = st.text_input("Emission Statement Number")
-    voyage_number = st.text_input("Voyage no.")
-    condition = st.selectbox("Condition (Laden/Ballast)", ["Laden", "Ballast"])
-
-    st.header("Route Information")
-    from_port = st.text_input("From (port)")
-    from_port_eu = st.selectbox("From (port) EU/Non-EU", ["EU", "Non-EU"])
-    to_port = st.text_input("To (Port)")
-    to_port_eu = st.selectbox("To (port) EU/Non-EU", ["EU", "Non-EU"])
-    eu_ets_pct = st.selectbox("Applicable EU ETS Voyage Type %", [0,50,100])
-    fueleu_pct = st.selectbox("Applicable FuelEU Voyage Type %", [0,50,100])
-
-    st.header("Sailing Schedule")
-    departure_date = st.text_input("Departure Date from last berth/(anchor for STS)  (UTC)\n(dd/mm/yyyy)")
-    departure_time = st.text_input("Departure Time from last berth/(anchor for STS)  (UTC)\n(hh:mm)")
-    arrival_date = st.text_input("Arrival Date at first berth/ (anchor for STS) (UTC)\n(dd/mm/yyyy)")
-    arrival_time = st.text_input("Arrival time at first berth/ (anchor for STS) (UTC)\n(hh:mm)")
-    distance_nm = st.number_input("Distance (Nm)", min_value=0.0, format="%.2f")
-
-    st.header("Sailing Fuel Consumption")
-    sailing_fuel = {}
-    for fuel in fuel_types:
-        with st.expander(f"Sailing Fuel: {fuel}"):
-            fuel_data = {}
-            for engine in engine_types:
-                val = st.number_input(f"{engine} {fuel} Sailing (MT)", min_value=0.0, value=0.0, format="%.2f",
-                                    key=f"{fuel}_sailing_{engine}")
-                fuel_data[engine] = val
-            sailing_fuel[fuel] = fuel_data
-
-    st.header("Port Information")
-    arrival_port = st.text_input("Arrival port")
-    port_activity = st.selectbox("Port Activity", ["Load", "Discharge", "Other"])
-    arrival_port_eu = st.selectbox("Arrival Port EU or Non-EU?", ["EU", "Non-EU"])
-    port_arrival_date = st.text_input("Arrival Date at first berth/(anchor for STS) (UTC)\n(dd/mm/yyyy)")
-    port_arrival_time = st.text_input("Arrival time at first berth/(anchor for STS) (UTC)\n(hh:mm)")
-    port_departure_date = st.text_input("Departure Date from last berth/(anchor for STS)  (UTC)\n(dd/mm/yyyy)")
-    port_departure_time = st.text_input("Departure time from last berth/(anchor for STS)  (UTC)\n(hh:mm)")
-    port_limits = st.selectbox("Within port limits or outside port limits", ["Within port limits","Outside port limits"])
-    total_stay_hours = st.number_input("Total Stay (hrs)", min_value=0.0, format="%.2f")
-
-    st.header("Port Fuel Consumption")
-    port_fuel = {}
-    for fuel in fuel_types:
-        with st.expander(f"Port Fuel: {fuel}"):
-            fuel_data = {}
-            for engine in engine_types:
-                val = st.number_input(f"{engine} {fuel} Port (MT)", min_value=0.0, value=0.0, format="%.2f",
-                                    key=f"{fuel}_port_{engine}")
-                fuel_data[engine] = val
-            port_fuel[fuel] = fuel_data
-
-    submitted = st.form_submit_button("Submit & Review")
-
-if submitted:
-    errors = []
-    if not validate_imo_number(imo_number):
-        errors.append("IMO No. must be exactly 7 digits.")
-    if departure_date and not validate_date(departure_date):
-        errors.append("Departure date format must be dd/mm/yyyy.")
-    if arrival_date and not validate_date(arrival_date):
-        errors.append("Arrival date format must be dd/mm/yyyy.")
-    if departure_time and not validate_time(departure_time):
-        errors.append("Departure time format must be hh:mm.")
-    if arrival_time and not validate_time(arrival_time):
-        errors.append("Arrival time format must be hh:mm.")
-
-    if errors:
-        st.error("Please correct these errors:")
-        for err in errors:
-            st.write(f"- {err}")
-    else:
-        voyage_data = {
-            "imo_number": imo_number,
-            "vessel": vessel,
-            "application_year": application_year,
-            "emission_statement_number": emission_statement_number,
-            "voyage_number": voyage_number,
-            "condition": condition,
-            "from_port": from_port,
-            "from_port_eu": from_port_eu,
-            "to_port": to_port,
-            "to_port_eu": to_port_eu,
-            "eu_ets_percentage": eu_ets_pct,
-            "fueleu_percentage": fueleu_pct,
-            "departure_date": departure_date,
-            "departure_time": departure_time,
-            "arrival_date": arrival_date,
-            "arrival_time": arrival_time,
-            "distance_nm": distance_nm,
-            "sailing_fuel": sailing_fuel,
-            "arrival_port": arrival_port,
-            "port_activity": port_activity,
-            "arrival_port_eu": arrival_port_eu,
-            "port_arrival_date": port_arrival_date,
-            "port_arrival_time": port_arrival_time,
-            "port_departure_date": port_departure_date,
-            "port_departure_time": port_departure_time,
-            "port_limits": port_limits,
-            "total_stay_hours": total_stay_hours,
-            "port_fuel": port_fuel
+st.header("Fuel Consumption Inputs")
+fuel_inputs = {}
+for fuel_type in FUEL_LIST:
+    with st.expander(f"Fuel: {fuel_type}"):
+        me_sailing = st.number_input(f"{fuel_type} ME Consumption Sailing (ton)", min_value=0.0, value=0.0, step=0.1)
+        ae_sailing = st.number_input(f"{fuel_type} AE Consumption Sailing (ton)", min_value=0.0, value=0.0, step=0.1)
+        me_port = st.number_input(f"{fuel_type} ME Consumption Port (ton)", min_value=0.0, value=0.0, step=0.1)
+        ae_port = st.number_input(f"{fuel_type} AE Consumption Port (ton)", min_value=0.0, value=0.0, step=0.1)
+        fuel_inputs[fuel_type] = {
+            "ME_Consumption_Sailing": me_sailing,
+            "AE_Consumption_Sailing": ae_sailing,
+            "ME_Consumption_Port": me_port,
+            "AE_Consumption_Port": ae_port
         }
 
-        st.success("All data validated and captured!")
+if st.button("Calculate Emissions"):
+    # Output dataframe
+    results = []
+    for fuel, vals in fuel_inputs.items():
+        factor = EMISSION_FACTORS[fuel]
+        sailing_mass = vals["ME_Consumption_Sailing"] + vals["AE_Consumption_Sailing"]
+        port_mass = vals["ME_Consumption_Port"] + vals["AE_Consumption_Port"]
+        sailing_energy_mj = calc_energy_mt(sailing_mass, factor["LCV_MJ_g"])
+        port_energy_mj = calc_energy_mt(port_mass, factor["LCV_MJ_g"])
+        sailing_ghg_mt = calc_ghg_mt(sailing_energy_mj, factor["GHG_WtW_gCO2e_MJ"])
+        port_ghg_mt = calc_ghg_mt(port_energy_mj, factor["GHG_WtW_gCO2e_MJ"])
+        sailing_co2_mt = calc_co2_mt(sailing_energy_mj, factor["CO2_TtW_gCO2e_MJ"])
+        port_co2_mt = calc_co2_mt(port_energy_mj, factor["CO2_TtW_gCO2e_MJ"])
+        sailing_eua = calc_eua(sailing_co2_mt)
+        port_eua = calc_eua(port_co2_mt)
+        results.append({
+            "Fuel": fuel,
+            "Sailing Fuel Used (ton)": sailing_mass,
+            "Port Fuel Used (ton)": port_mass,
+            "Sailing Energy (TJ)": sailing_energy_mj/1e6,
+            "Port Energy (TJ)": port_energy_mj/1e6,
+            "Sailing GHG WtW (MT)": sailing_ghg_mt,
+            "Port GHG WtW (MT)": port_ghg_mt,
+            "Sailing CO2 TtW (MT)": sailing_co2_mt,
+            "Port CO2 TtW (MT)": port_co2_mt,
+            "Sailing EUAs": sailing_eua,
+            "Port EUAs": port_eua
+        })
+    result_df = pd.DataFrame(results)
+    st.subheader("GHG/CO2/ETS Results (Per Fuel)")
+    st.dataframe(result_df, use_container_width=True)
 
-        st.header("Summary")
-        st.json(voyage_data)
+    st.subheader("Totals")
+    total_row = {
+        "Sailing Fuel Used (ton)": result_df["Sailing Fuel Used (ton)"].sum(),
+        "Port Fuel Used (ton)": result_df["Port Fuel Used (ton)"].sum(),
+        "Sailing Energy (TJ)": result_df["Sailing Energy (TJ)"].sum(),
+        "Port Energy (TJ)": result_df["Port Energy (TJ)"].sum(),
+        "Sailing GHG WtW (MT)": result_df["Sailing GHG WtW (MT)"].sum(),
+        "Port GHG WtW (MT)": result_df["Port GHG WtW (MT)"].sum(),
+        "Sailing CO2 TtW (MT)": result_df["Sailing CO2 TtW (MT)"].sum(),
+        "Port CO2 TtW (MT)": result_df["Port CO2 TtW (MT)"].sum(),
+        "Sailing EUAs": result_df["Sailing EUAs"].sum(),
+        "Port EUAs": result_df["Port EUAs"].sum()
+    }
+    st.write(pd.DataFrame([total_row]).T.rename(columns={0:'Total'}))
 
-        # Download Options
-        st.download_button(
-            label="Download JSON",
-            data=json.dumps(voyage_data, indent=2),
-            file_name=f"voyage_{voyage_number or 'unknown'}.json",
-            mime="application/json"
-        )
+    st.success("Calculation completed. Download your table below:")
 
-        st.download_button(
-            label="Download CSV",
-            data=download_csv(voyage_data),
-            file_name=f"voyage_{voyage_number or 'unknown'}.csv",
-            mime="text/csv"
-        )
+    st.download_button(
+        label="Download Results as CSV",
+        data=result_df.to_csv(index=False),
+        file_name=f"{vessel_name}_voyage_{voyage_no}_emissions.csv",
+        mime="text/csv"
+    )
